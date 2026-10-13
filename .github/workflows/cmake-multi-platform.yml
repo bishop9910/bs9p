@@ -1,0 +1,56 @@
+name: CMake on multiple platforms
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            preset: gcc
+          - os: ubuntu-latest
+            preset: clang
+          - os: windows-latest
+            preset: msvc
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgDirectory: '${{ github.workspace }}/vcpkg'
+
+    - name: Setup MSVC
+      if: matrix.os == 'windows-latest'
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Configure
+      run: cmake --preset ${{ matrix.preset }}
+
+    - name: Build
+      run: cmake --build --preset ${{ matrix.preset }}
+
+    - name: Test
+      run: ctest --preset ${{ matrix.preset }}
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-${{ matrix.preset }}
+        path: |
+          build/${{ matrix.preset }}/**
+          !build/${{ matrix.preset }}/CMakeFiles/**
+          !build/${{ matrix.preset }}/**/*.o
+          !build/${{ matrix.preset }}/**/*.obj
+          !build/${{ matrix.preset }}/**/*.a
+          !build/${{ matrix.preset }}/**/*.lib
+          !build/${{ matrix.preset }}/**/vcpkg_installed/**
+        if-no-files-found: warn

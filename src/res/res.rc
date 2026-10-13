@@ -1,0 +1,39 @@
+#pragma code_page(65001)
+
+#include <winuser.h>
+#include <winver.h>
+
+32512 ICON "appIcon.ico"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID MANIFEST "manifest.xml"
+
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     2,0,0,2     // 文件版本号
+PRODUCTVERSION  2,0,0,2     // 产品版本号
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"        // 语言和字符集 (简体中文 / Unicode)
+        BEGIN
+            VALUE "CompanyName", "Sanasu" // 公司名称
+            VALUE "FileDescription", "bs9p encoode/decode programme" // 程序描述
+            VALUE "FileVersion", "2.0.0.2" // 文件版本号
+            VALUE "InternalName", "bs9p" // 程序名称
+            VALUE "LegalCopyright", "Copyright © 2026 bishop9910 All Rights Reserved." // 版权所有
+            VALUE "OriginalFilename", "bs9p.exe" // 原始文件名 
+            VALUE "ProductName", "bs9p" // 产品名称
+            VALUE "ProductVersion", "2.0.0.2" // 产品版本号
+        END
+    END
+
+    BLOCK "VarFileInfo"
+    BEGIN
+       VALUE "Translation", 0x0804, 1200 // 简体中文 / Unicode
+    END
+END

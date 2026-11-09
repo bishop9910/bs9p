@@ -9,8 +9,8 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID MANIFEST "manifest.xml"
 
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     2,0,0,2     // 文件版本号
-PRODUCTVERSION  2,0,0,2     // 产品版本号
+FILEVERSION     1,0,3,0     // 文件版本号
+PRODUCTVERSION  1,0,3,0     // 产品版本号
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -23,12 +23,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Sanasu" // 公司名称
             VALUE "FileDescription", "bs9p encoode/decode programme" // 程序描述
-            VALUE "FileVersion", "2.0.0.2" // 文件版本号
+            VALUE "FileVersion", "1.0.3" // 文件版本号
             VALUE "InternalName", "bs9p" // 程序名称
             VALUE "LegalCopyright", "Copyright © 2026 bishop9910 All Rights Reserved." // 版权所有
             VALUE "OriginalFilename", "bs9p.exe" // 原始文件名 
             VALUE "ProductName", "bs9p" // 产品名称
-            VALUE "ProductVersion", "2.0.0.2" // 产品版本号
+            VALUE "ProductVersion", "1.0.3" // 产品版本号
         END
     END
 

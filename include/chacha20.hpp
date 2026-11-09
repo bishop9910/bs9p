@@ -1,86 +1,90 @@
-#include <cstdint>
+#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
+
+#include <openssl/evp.h>
 
 #ifndef _BS9_CHACHA20
 #define _BS9_CHACHA20 1
 
+// RFC 8439 ChaCha20（IETF 变体：32 bit 计数器 + 96 bit nonce）。
+// 加解密都由 OpenSSL 的 EVP_chacha20 完成：它和原先的手写实现同为 RFC 8439，
+// 密钥流逐字节一致，因此已有密文格式不受影响。
+//
+// OpenSSL 的 EVP_chacha20 取 16 字节 IV：低 4 字节是小端计数器，高 12 字节是 nonce。
 namespace bs9 {
-  inline uint32_t rotl32(uint32_t val, int bits) {
-    return (val << bits) | (val >> (32 - bits));
-  }
+  inline constexpr size_t CHACHA_KEY_LEN = 32;
+  inline constexpr size_t CHACHA_NONCE_LEN = 12;
+  inline constexpr size_t CHACHA_BLOCK_LEN = 64;
 
-  inline uint32_t load32(const uint8_t* data) {
-    return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
-           (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
-  }
-
-  inline void chacha_quarter(uint32_t x[16], int a, int b, int c, int d) {
-    x[a] += x[b]; x[d] = bs9::rotl32(x[d] ^ x[a], 16);
-    x[c] += x[d]; x[b] = bs9::rotl32(x[b] ^ x[c], 12);
-    x[a] += x[b]; x[d] = bs9::rotl32(x[d] ^ x[a], 8);
-    x[c] += x[d]; x[b] = bs9::rotl32(x[b] ^ x[c], 7);
-  }
-
-  inline void chacha20_block(uint32_t state[16], uint8_t out[64]) {
-    uint32_t work[16];
-    std::memcpy(work, state, sizeof(work));
-
-    for (int i = 0; i < 10; ++i) {
-      bs9::chacha_quarter(work, 0, 4, 8, 12);
-      bs9::chacha_quarter(work, 1, 5, 9, 13);
-      bs9::chacha_quarter(work, 2, 6, 10, 14);
-      bs9::chacha_quarter(work, 3, 7, 11, 15);
-      bs9::chacha_quarter(work, 0, 5, 10, 15);
-      bs9::chacha_quarter(work, 1, 6, 11, 12);
-      bs9::chacha_quarter(work, 2, 7, 8, 13);
-      bs9::chacha_quarter(work, 3, 4, 9, 14);
-    }
-
-    for (int i = 0; i < 16; ++i) {
-      const uint32_t val = work[i] + state[i];
-      out[i * 4] = static_cast<uint8_t>(val);
-      out[i * 4 + 1] = static_cast<uint8_t>(val >> 8);
-      out[i * 4 + 2] = static_cast<uint8_t>(val >> 16);
-      out[i * 4 + 3] = static_cast<uint8_t>(val >> 24);
-    }
-
-    ++state[12];
+  // 从 counter 开始，这条密钥流最多还能产出多少字节而不回卷计数器。
+  inline uint64_t chacha_max_bytes(uint32_t counter) {
+    return (static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - counter + 1ull) * CHACHA_BLOCK_LEN;
   }
 
   class ChaCha20 {
-    uint32_t state_[16] = {};
-    uint8_t block_[64] = {};
-    size_t pos_ = 64;
+    EVP_CIPHER_CTX* ctx_ = nullptr;
+    uint64_t used_ = 0;
+    uint64_t capacity_ = 0;
 
   public:
-    ChaCha20(const uint8_t* key, const uint8_t* nonce, uint32_t counter) {
-      state_[0] = 0x61707865;
-      state_[1] = 0x3320646e;
-      state_[2] = 0x79622d32;
-      state_[3] = 0x6b206574;
-      for (int i = 0; i < 8; ++i) state_[4 + i] = bs9::load32(key + i * 4);
-      state_[12] = counter;
-      state_[13] = bs9::load32(nonce);
-      state_[14] = bs9::load32(nonce + 4);
-      state_[15] = bs9::load32(nonce + 8);
-    }
+    ChaCha20(const uint8_t* key, const uint8_t* nonce, uint32_t counter = 0) {
+      std::array<uint8_t, 16> iv{};
+      iv[0] = static_cast<uint8_t>(counter);
+      iv[1] = static_cast<uint8_t>(counter >> 8);
+      iv[2] = static_cast<uint8_t>(counter >> 16);
+      iv[3] = static_cast<uint8_t>(counter >> 24);
+      std::memcpy(iv.data() + 4, nonce, bs9::CHACHA_NONCE_LEN);
 
-    void fill(uint8_t* out, size_t len) {
-      for (size_t i = 0; i < len; ++i) out[i] = next_byte();
-    }
+      ctx_ = EVP_CIPHER_CTX_new();
+      if (ctx_ == nullptr) throw std::runtime_error("Failed to create ChaCha20 context");
 
-    void xor_data(uint8_t* data, size_t len) {
-      for (size_t i = 0; i < len; ++i) data[i] ^= next_byte();
-    }
-
-  private:
-    uint8_t next_byte() {
-      if (pos_ == 64) {
-        bs9::chacha20_block(state_, block_);
-        pos_ = 0;
+      if (EVP_EncryptInit_ex(ctx_, EVP_chacha20(), nullptr, key, iv.data()) != 1) {
+        EVP_CIPHER_CTX_free(ctx_);
+        ctx_ = nullptr;
+        throw std::runtime_error("Failed to initialize ChaCha20");
       }
-      return block_[pos_++];
+
+      capacity_ = bs9::chacha_max_bytes(counter);
+    }
+
+    ChaCha20(const ChaCha20&) = delete;
+    ChaCha20& operator=(const ChaCha20&) = delete;
+
+    ~ChaCha20() { EVP_CIPHER_CTX_free(ctx_); }
+
+    // 原地 XOR；流密码加密与解密是同一个操作。
+    void xor_data(uint8_t* data, size_t len) {
+      if (len == 0) return;
+      if (len > capacity_ - used_) {
+        throw std::runtime_error("ChaCha20 counter overflow: file is too large for a single key stream");
+      }
+
+      size_t offset = 0;
+      while (offset < len) {
+        // EVP_EncryptUpdate 的长度参数是 int，分块避免溢出。
+        const size_t step = std::min<size_t>(len - offset, size_t{1} << 30);
+        int out_len = 0;
+        if (EVP_EncryptUpdate(ctx_, data + offset, &out_len, data + offset, static_cast<int>(step)) != 1) {
+          throw std::runtime_error("ChaCha20 encryption failed");
+        }
+        if (out_len != static_cast<int>(step)) {
+          throw std::runtime_error("ChaCha20 produced an unexpected number of bytes");
+        }
+        offset += step;
+      }
+
+      used_ += len;
+    }
+
+    // 生成密钥流本身（用于置换表洗牌）。
+    void fill(uint8_t* out, size_t len) {
+      std::memset(out, 0, len);
+      xor_data(out, len);
     }
   };
 }

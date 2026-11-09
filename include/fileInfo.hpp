@@ -1,5 +1,5 @@
-#include <string>
 #include <filesystem>
+#include <string>
 
 #ifndef _BS9_FILEINFO
 #define _BS9_FILEINFO 1
@@ -15,7 +15,8 @@ namespace bs9 {
     fs::path pure_path;    // full path without extension: "/home/user/report"
   };
 
-  FileInfo parse_file(const fs::path& filepath) {
+  // header-only 工程里必须 inline：否则每个包含本头的翻译单元都会产生一份定义。
+  inline FileInfo parse_file(const fs::path& filepath) {
     FileInfo info;
     info.stem = filepath.stem().string();
     info.extension = filepath.extension().string();

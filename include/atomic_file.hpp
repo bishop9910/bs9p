@@ -11,6 +11,7 @@
 
 #include "fileInfo.hpp"
 #include "key.hpp"
+#include "path_util.hpp"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -52,17 +53,17 @@ namespace bs9 {
                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (handle == INVALID_HANDLE_VALUE) {
-        throw std::runtime_error("Failed to open file for flushing: " + path.string());
+        throw std::runtime_error("Failed to open file for flushing: " + bs9::path_to_utf8(path));
       }
       const BOOL flushed = ::FlushFileBuffers(handle);
       ::CloseHandle(handle);
-      if (flushed == 0) throw std::runtime_error("Failed to flush file to disk: " + path.string());
+      if (flushed == 0) throw std::runtime_error("Failed to flush file to disk: " + bs9::path_to_utf8(path));
 #else
       const int fd = ::open(path.c_str(), O_RDONLY);
-      if (fd < 0) throw std::runtime_error("Failed to open file for flushing: " + path.string());
+      if (fd < 0) throw std::runtime_error("Failed to open file for flushing: " + bs9::path_to_utf8(path));
       const int rc = ::fsync(fd);
       ::close(fd);
-      if (rc != 0) throw std::runtime_error("Failed to flush file to disk: " + path.string());
+      if (rc != 0) throw std::runtime_error("Failed to flush file to disk: " + bs9::path_to_utf8(path));
 #endif
     }
 
@@ -73,25 +74,25 @@ namespace bs9 {
       if (::MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH) == 0) {
         const DWORD error = ::GetLastError();
         if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) {
-          throw std::runtime_error("File already exists: " + to.string());
+          throw std::runtime_error("File already exists: " + bs9::path_to_utf8(to));
         }
-        throw std::runtime_error("Failed to move temporary file into place: " + to.string() + " (Windows error " +
-                                 std::to_string(error) + ")");
+        throw std::runtime_error("Failed to move temporary file into place: " + bs9::path_to_utf8(to) +
+                                 " (Windows error " + std::to_string(error) + ")");
       }
 #else
       // link(2) 在目标已存在时返回 EEXIST，天然没有「先检查再改名」的竞争窗口。
       if (::link(from.c_str(), to.c_str()) == 0) {
         ::unlink(from.c_str());
       } else if (errno == EEXIST) {
-        throw std::runtime_error("File already exists: " + to.string());
+        throw std::runtime_error("File already exists: " + bs9::path_to_utf8(to));
       } else if (errno == EPERM || errno == EOPNOTSUPP || errno == EXDEV || errno == ENOTSUP) {
         // 文件系统不支持硬链接（FAT/exFAT、部分网络盘）：退回改名。
         std::error_code ec;
         fs::rename(from, to, ec);
-        if (ec) throw std::runtime_error("Failed to move temporary file into place: " + to.string() + " (" +
+        if (ec) throw std::runtime_error("Failed to move temporary file into place: " + bs9::path_to_utf8(to) + " (" +
                                          ec.message() + ")");
       } else {
-        throw std::runtime_error("Failed to move temporary file into place: " + to.string() + " (" +
+        throw std::runtime_error("Failed to move temporary file into place: " + bs9::path_to_utf8(to) + " (" +
                                  std::strerror(errno) + ")");
       }
 #endif
@@ -120,16 +121,18 @@ namespace bs9 {
       fs::path directory = target_.parent_path();
       if (directory.empty()) directory = fs::path(".");
 
-      temp_ = directory / fs::path(target_.filename().string() + ".tmp-" + bs9::detail::random_hex());
+      // 临时文件名 = 目标文件名 + ".tmp-" + 随机后缀：用 UTF-8 中转，避免 ACP 转换把日文名变成 '?'。
+      const std::string base = bs9::path_to_utf8(target_.filename()) + ".tmp-";
+      temp_ = directory / bs9::path_from_utf8(base + bs9::detail::random_hex());
       for (int attempt = 0; attempt < 8; ++attempt) {
         std::error_code ec;
         if (!fs::exists(temp_, ec)) break;
-        temp_ = directory / fs::path(target_.filename().string() + ".tmp-" + bs9::detail::random_hex());
+        temp_ = directory / bs9::path_from_utf8(base + bs9::detail::random_hex());
       }
 
       ofs_.open(temp_, std::ios::binary | std::ios::trunc);
       if (!ofs_.is_open()) {
-        throw std::runtime_error("Failed to create temporary output file: " + temp_.string());
+        throw std::runtime_error("Failed to create temporary output file: " + bs9::path_to_utf8(temp_));
       }
       // 之后任何写失败（磁盘满、权限、句柄失效）都会抛异常，而不是被静默忽略。
       ofs_.exceptions(std::ios::failbit | std::ios::badbit);

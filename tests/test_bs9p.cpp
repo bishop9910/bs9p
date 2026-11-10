@@ -1,6 +1,13 @@
+#ifdef _MSC_VER
+// 测试里用 std::fopen 只是为了把进度条渲染结果落到文件，不是生产代码；
+// 关掉 MSVC 的 C4996 才能保持零警告构建。
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -12,6 +19,7 @@
 #include "chacha20.hpp"
 #include "core.hpp"
 #include "data_dict.hpp"
+#include "path_util.hpp"
 
 namespace fs = std::filesystem;
 
@@ -22,6 +30,23 @@ namespace {
   void fail(const char* file, int line, const char* what) {
     std::fprintf(stderr, "FAIL %s:%d: %s\n", file, line, what);
     ++g_failures;
+  }
+
+  // 出问题（尤其平台相关的路径/编码异常）时，设 BS9P_TEST_TRACE=1 就能看到卡在哪一步。
+  bool trace_enabled() {
+#ifdef _MSC_VER
+    char* buffer = nullptr;
+    size_t size = 0;
+    const bool present = ::_dupenv_s(&buffer, &size, "BS9P_TEST_TRACE") == 0 && buffer != nullptr;
+    std::free(buffer);
+    return present;
+#else
+    return std::getenv("BS9P_TEST_TRACE") != nullptr;
+#endif
+  }
+
+  void trace(const char* step) {
+    if (trace_enabled()) std::fprintf(stderr, "[trace] %s\n", step);
   }
 }
 
@@ -208,6 +233,18 @@ namespace {
     corrupted.seekg(0);
     CHECK_THROWS(bs9::read_header(corrupted));
 
+    // 旧版本的 magic（1.0.3 的 BS9P103、以及更早的 BS91002）不再兼容
+    for (const char* old_magic : {"BS9P103", "BS91002"}) {
+      std::stringstream legacy(std::ios::in | std::ios::out | std::ios::binary);
+      std::vector<uint8_t> legacy_bytes = original.raw;
+      std::memcpy(legacy_bytes.data(), old_magic, 7);
+      legacy_bytes[7] = 0;
+      legacy.write(reinterpret_cast<const char*>(legacy_bytes.data()),
+                   static_cast<std::streamsize>(legacy_bytes.size()));
+      legacy.seekg(0);
+      CHECK_THROWS(bs9::read_header(legacy));
+    }
+
     // 头被截断：必须拒绝
     std::stringstream truncated(std::ios::in | std::ios::out | std::ios::binary);
     truncated.write(reinterpret_cast<const char*>(original.raw.data()), 10);
@@ -264,7 +301,7 @@ namespace {
   size_t count_temp_files(const fs::path& dir) {
     size_t count = 0;
     for (const auto& entry : fs::directory_iterator(dir)) {
-      if (entry.path().filename().string().find(".tmp-") != std::string::npos) ++count;
+      if (bs9::path_to_utf8(entry.path().filename()).find(".tmp-") != std::string::npos) ++count;
     }
     return count;
   }
@@ -287,14 +324,14 @@ namespace {
       fs::remove(plain);
 
       // 内存路径（默认阈值）
-      const std::string decoded = bs9::decode_file(encoded, password);
+      const std::string decoded = bs9::decode_file(bs9::path_from_utf8(encoded), password);
       CHECK(fs::path(decoded) == plain);
       CHECK(read_file(decoded) == original);
       fs::remove(decoded);
 
       // 大文件路径（阈值 0 强制走流式）
       if (!original.empty()) {
-        const std::string streamed = bs9::decode_file(encoded, password, 0);
+        const std::string streamed = bs9::decode_file(bs9::path_from_utf8(encoded), password, 0);
         CHECK(fs::path(streamed) == plain);
         CHECK(read_file(streamed) == original);
         fs::remove(streamed);
@@ -302,6 +339,131 @@ namespace {
 
       fs::remove(encoded);
       CHECK(count_temp_files(dir) == 0);
+    }
+
+    fs::remove_all(dir);
+  }
+
+  // 非 ASCII 路径：中文、日文假名、片假名中点 U+30FB、空格。
+  // U+30FB 在 Windows 的 CP936 / CP932 里没有映射，一旦走了 ACP 转换就会变成 '?'，
+  // 所以这里同时验证「字符串 -> 路径」与「文件头里的扩展名」都按 UTF-8 走通。
+  void test_unicode_paths() {
+    const fs::path dir = make_temp_dir();
+    const std::string password = "pw-unicode";
+
+    {
+      trace("unicode: build path");
+      const fs::path plain = dir / fs::u8path("(18禁ゲームCG) [ゆずソフト] ライムライト・レモネード ジャム.7z");
+      const std::vector<uint8_t> original = make_payload(20000, 7);
+      trace("unicode: write plain");
+      write_file(plain, original);
+
+      trace("unicode: encode");
+      const std::string encoded = bs9::encode_file(plain, password);
+      CHECK(encoded == bs9::path_to_utf8(plain) + ".bs9p");
+      CHECK(fs::exists(fs::u8path(encoded)));
+
+      fs::remove(plain);
+      trace("unicode: decode");
+      const std::string decoded = bs9::decode_file(bs9::path_from_utf8(encoded), password);
+      CHECK(decoded == bs9::path_to_utf8(plain));
+      CHECK(read_file(plain) == original);
+      CHECK(count_temp_files(dir) == 0);
+
+      fs::remove(plain);
+      fs::remove(fs::u8path(encoded));
+    }
+
+    {
+      // 扩展名本身也含非 ASCII：文件头里存的是 UTF-8 字节，解密时要能原样拼回名字。
+      const fs::path plain = dir / fs::u8path("中文・文件名.文档");
+      const std::vector<uint8_t> original = make_payload(4096, 9);
+      write_file(plain, original);
+
+      const std::string encoded = bs9::encode_file(plain, password);
+      CHECK(encoded == bs9::path_to_utf8(plain) + ".bs9p");
+
+      fs::remove(plain);
+      CHECK(bs9::decode_file(bs9::path_from_utf8(encoded), password) == bs9::path_to_utf8(plain));
+      CHECK(read_file(plain) == original);
+      CHECK(count_temp_files(dir) == 0);
+
+      fs::remove(plain);
+      fs::remove(fs::u8path(encoded));
+    }
+
+    fs::remove_all(dir);
+  }
+
+  // IO 选项：--out（文件或目录）、--buffer-size 两端、进度条渲染。
+  void test_io_options() {
+    const fs::path dir = make_temp_dir();
+    const std::string password = "pw-io-options";
+
+    // 1) clamp 的边界行为
+    CHECK(bs9::clamp_buffer_size(0) == bs9::MIN_BUFFER_SIZE);
+    CHECK(bs9::clamp_buffer_size(1) == bs9::MIN_BUFFER_SIZE);
+    CHECK(bs9::clamp_buffer_size(bs9::MAX_BUFFER_SIZE + 1) == bs9::MAX_BUFFER_SIZE);
+    CHECK(bs9::clamp_buffer_size(123456) == 123456);
+
+    const fs::path plain = dir / "option.bin";
+    const std::vector<uint8_t> original = make_payload(200000, 77);
+    write_file(plain, original);
+
+    // 2) --out 给目录：密文放进该目录并沿用默认文件名，解密也落在同一目录
+    {
+      const fs::path outdir = dir / "out";
+      fs::create_directories(outdir);
+      bs9::IoOptions io;
+      io.output = outdir;
+      const std::string encoded = bs9::encode_file(plain, password, io);
+      CHECK(fs::path(bs9::path_from_utf8(encoded)) == outdir / "option.bin.bs9p");
+
+      const std::string decoded = bs9::decode_file(bs9::path_from_utf8(encoded), password);
+      CHECK(fs::path(bs9::path_from_utf8(decoded)) == outdir / "option.bin");
+      CHECK(read_file(fs::path(bs9::path_from_utf8(decoded))) == original);
+
+      fs::remove(fs::path(bs9::path_from_utf8(encoded)));
+      fs::remove(fs::path(bs9::path_from_utf8(decoded)));
+      fs::remove(outdir);
+    }
+
+    // 3) 缓冲大小两端：64 KiB 与 64 MiB 都要正确往返（第三条参数 0 强制走流式解密路径）
+    for (const size_t buffer_size : {bs9::MIN_BUFFER_SIZE, bs9::MAX_BUFFER_SIZE}) {
+      bs9::IoOptions io;
+      io.buffer_size = buffer_size;
+      const std::string encoded = bs9::encode_file(plain, password, io);
+      CHECK(fs::file_size(fs::path(bs9::path_from_utf8(encoded))) == original.size() + 4 + 82);
+      fs::remove(plain);
+
+      const std::string decoded = bs9::decode_file(bs9::path_from_utf8(encoded), password, 0, io);
+      CHECK(fs::path(bs9::path_from_utf8(decoded)) == plain);
+      CHECK(read_file(plain) == original);
+
+      fs::remove(fs::path(bs9::path_from_utf8(encoded)));
+      CHECK(count_temp_files(dir) == 0);
+    }
+
+    // 4) 进度条渲染：写进普通文件后检查内容（不依赖 stderr 是否为终端）
+    {
+      const fs::path log = dir / "progress.log";
+      std::FILE* fp = std::fopen(bs9::path_to_utf8(log).c_str(), "wb");
+      CHECK(fp != nullptr);
+      if (fp) {
+        {
+          bs9::Progress progress(fp);
+          progress.begin(16ull * 1024 * 1024, "encrypting");
+          progress.update(8ull * 1024 * 1024);
+          progress.finish();
+        }
+        std::fclose(fp);
+        const std::vector<uint8_t> raw = read_file(log);
+        const std::string text(raw.begin(), raw.end());
+        CHECK(text.find("encrypting") != std::string::npos);
+        CHECK(text.find("100.0%") != std::string::npos);
+        CHECK(text.find("ETA") != std::string::npos);
+        fs::remove(log);
+      }
     }
 
     fs::remove_all(dir);
@@ -318,7 +480,7 @@ namespace {
     fs::remove(plain);
 
     // 1) 密码错误：抛异常，且不留下输出文件与临时文件
-    CHECK_THROWS(bs9::decode_file(encoded, "wrong password"));
+    CHECK_THROWS(bs9::decode_file(bs9::path_from_utf8(encoded), "wrong password"));
     CHECK(!fs::exists(plain));
     CHECK(count_temp_files(dir) == 0);
 
@@ -349,7 +511,7 @@ namespace {
     {
       const std::vector<uint8_t> sentinel = {1, 2, 3, 4, 5};
       write_file(plain, sentinel);
-      CHECK_THROWS(bs9::decode_file(encoded, password));
+      CHECK_THROWS(bs9::decode_file(bs9::path_from_utf8(encoded), password));
       CHECK(read_file(plain) == sentinel);
       fs::remove(plain);
     }
@@ -357,7 +519,7 @@ namespace {
     // 5) 加密时目标文件已存在
     {
       write_file(plain, original);
-      write_file(fs::path(encoded), {9, 9, 9});
+      write_file(fs::path(bs9::path_from_utf8(encoded)), {9, 9, 9});
       CHECK_THROWS(bs9::encode_file(plain, password));
       CHECK(read_file(encoded) == std::vector<uint8_t>({9, 9, 9}));
       fs::remove(encoded);
@@ -388,6 +550,8 @@ int main() {
     test_data_dict();
     test_header();
     test_roundtrip();
+    test_unicode_paths();
+    test_io_options();
     test_failures();
   } catch (const std::exception& e) {
     std::fprintf(stderr, "UNEXPECTED EXCEPTION: %s\n", e.what());

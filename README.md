@@ -5,7 +5,8 @@
 ## 特性
 
 - **密码加密** —— 密码是任意字符串（不再是数字种子），PBKDF2-HMAC-SHA256 迭代 200000 轮派生密钥
-- **流式处理** —— 64 KiB 分块读写，内存占用恒定，多大的文件都能处理
+- **流式处理** —— 分块读写，内存占用恒定（默认 64 KiB 一块，`--buffer-size` 可在 64 KiB – 64 MiB 之间调整），多大的文件都能处理
+- **进度显示** —— 大文件（≥ 8 MiB）在交互式终端里显示百分比、已处理/总量、实时速率与 ETA；`--silent` 或输出被重定向时不显示
 - **认证加密（encrypt-then-MAC）** —— HMAC-SHA256 覆盖「文件头 + 密文」，密码错 / 被篡改时不会留下任何明文
 - **两层保护** —— 先按 `dict` 密钥派生的 256 字节置换表逐字节映射，再 ChaCha20 XOR
 - **保留扩展名** —— 原始扩展名明文存在文件头里，解密自动还原 `report.pdf.bs9p` → `report.pdf`
@@ -60,7 +61,7 @@ cmake --build --preset=default
 ctest --test-dir build/default -C Release --output-on-failure
 ```
 
-单元测试覆盖：ChaCha20 标准测试向量与独立参考实现对比、置换表可逆性、文件头往返、多种尺寸的加解密往返（含两条解密路径）、错密码 / 篡改 / 截断 / 目标已存在 / 路径自覆盖等失败路径。
+单元测试覆盖：ChaCha20 标准测试向量与独立参考实现对比、置换表可逆性、文件头往返、多种尺寸的加解密往返（含两条解密路径）、非 ASCII 路径、`--out` / 缓冲大小两端与进度条渲染、错密码 / 篡改 / 截断 / 目标已存在 / 路径自覆盖等失败路径。
 
 **说明**：
 
@@ -101,7 +102,40 @@ echo "my secret password" | bs9p encode report.pdf --password-stdin
 
 省略密码时：如果终端是 TTY，会提示 `Password: ` 并以 `*` 回显（不回显明文）；如果 stdin 是管道或文件，则直接读一行。
 
-只给一个位置参数（`bs9p encode report.pdf`）时，程序自动识别：该参数存在则当作输入文件、密码改为交互式询问。
+只给一个位置参数（`bs9p encode report.pdf`）时，程序把它当作输入文件，密码改为交互式询问（或配合 `--password-stdin`）。
+
+### 进度条与输出位置
+
+```bash
+# 大文件加密：终端里（stderr 是 TTY）自动显示进度
+bs9p encode "my secret password" movie.mkv
+# encrypting [############............]  52.3%  4.28 GiB / 8.19 GiB  85.1 MiB/s  ETA 00:47
+
+# 指定输出文件，或指定一个已存在的目录（沿用默认文件名）
+bs9p encode "my secret password" report.pdf -o D:\backup\report.pdf.bs9p
+bs9p encode "my secret password" report.pdf -o D:\backup
+
+# 机械盘上如果觉得慢，可以试更小的缓冲（默认 64 KiB 就是机械盘的最优值）
+bs9p encode "my secret password" movie.mkv -b 65536
+```
+
+进度条写在 **stderr**，所以重定向 stdout 不会污染结果；小于 8 MiB 的文件不显示（一闪而过没意义）；`-s / --silent` 时完全不显示。
+
+> 关于缓冲大小：实测在同一块机械盘上边读边写时，**64 KiB 明显快于更大的缓冲**（大块写入会把写回打散，吞吐反而从 ~85 MiB/s 掉到 ~37 MiB/s）；SSD 上 1 MiB 只比 64 KiB 快约 7%。所以 64 KiB 是默认值，`-b` 给网络盘 / SSD 之类的场景留了调整空间。
+
+### 非 ASCII 路径（中文 / 日文等）
+
+Windows 下 `main` 的 `argv` 会被 CRT 按系统 ANSI 代码页（本机通常是 936）转换，`・`、`①`、部分假名之类的字符在这一步就会变成 `?`，导致路径直接失效。所以程序在 Windows 上**不使用 CRT 的 `argv`**：改为读取 `GetCommandLineW()` 的宽字符命令行，自己拆参数，全程用 UTF-8 传递，再经 `std::filesystem::u8path` 转成宽路径打开文件。带 `・`、空格、括号的日文文件名可以直接使用：
+
+```powershell
+# Windows PowerShell 5.1
+.\bs9p.exe encode 'my password' '(18禁ゲームCG) [ゆずソフト] ライムライト・レモネード ジャム.7z'
+# → (18禁ゲームCG) [ゆずソフト] ライムライト・レモネード ジャム.7z.bs9p
+```
+
+控制台输出也做了处理：输出到真正的控制台时用 `WriteConsoleW` 写宽字符，不会被代码页吞字；输出被重定向或走管道时，按 `GetConsoleOutputCP()` 转成控制台代码页（Windows PowerShell 5.1 按 `[Console]::OutputEncoding` 解码），没有控制台时保持 UTF-8。
+
+文件头里的扩展名同样以 UTF-8 原样存取，所以 `.文档` 这类非 ASCII 扩展名解密后能完整还原。
 
 ### 示例
 
@@ -128,6 +162,8 @@ bs9p --help
 | `mode` | 位置参数，只接受 `encode` / `decode` | 必填 |
 | `password` | 位置参数，密码，任意字符串 | 省略则交互式询问 |
 | `input` | 位置参数，输入文件路径 | 必填 |
+| `-o, --out` | 输出文件路径；给一个已存在的目录则把默认文件名放进去 | 默认命名 |
+| `-b, --buffer-size` | IO 缓冲字节数，范围 65536 – 67108864 | `65536`（64 KiB） |
 | `--password-stdin` | 从标准输入读一行作为密码 | 关闭 |
 | `-s, --silent` | 成功时不打印提示 | 关闭 |
 | `-h, --help` | 显示帮助并退出 | — |
@@ -141,7 +177,7 @@ bs9p --help
 
 | 偏移 | 长度 | 字段 | 说明 |
 |---|---|---|---|
-| 0 | 8 | magic | `42 53 39 50 31 30 33 00`，即 `"BS9P103\0"` |
+| 0 | 8 | magic | `42 53 39 50 31 30 34 00`，即 `"BS9P104\0"` |
 | 8 | 4 | iterations | PBKDF2 迭代次数，当前固定 200000；解密时校验范围 1 – 10000000 |
 | 12 | 16 | salt | 随机盐 |
 | 28 | 12 | nonce | ChaCha20 的 nonce（96 bit） |
@@ -182,7 +218,7 @@ dict   = HMAC-SHA256(master, "bs9p/dict")
 
 1. 取输入文件的扩展名与大小，随机生成 salt / nonce，拼出文件头，并先把文件头喂给 HMAC
 2. 派生密钥、重建置换表，在目标同目录创建临时文件并写出文件头
-3. 每 64 KiB 一块：逐字节过置换表映射 → ChaCha20 XOR → 更新 HMAC → 写临时文件
+3. 每块（默认 64 KiB，`--buffer-size` 可调）：逐字节过置换表映射 → ChaCha20 XOR → 更新 HMAC → 写临时文件
 4. 追加 32 字节 tag，`fsync`，然后原子改名到最终路径（已存在则失败，不覆盖）
 
 ### 解密流程
@@ -216,6 +252,8 @@ bs9p/
 │   ├── fileInfo.hpp      # 路径拆解（stem / extension / parent）
 │   ├── key.hpp           # 密钥派生（PBKDF2 + HMAC 扩展，OpenSSL）
 │   ├── magic.hpp         # 文件魔数
+│   ├── path_util.hpp     # UTF-8 字符串 <-> 文件系统路径（Windows 走宽字符）
+│   ├── progress.hpp      # 终端进度条（stderr，TTY 才显示）
 │   ├── secure.hpp        # 敏感数据擦除（OPENSSL_cleanse）
 │   └── sha256.hpp        # SHA-256 / HMAC-SHA256（OpenSSL EVP）
 ├── src/
@@ -229,18 +267,18 @@ bs9p/
 ## 版本与兼容性
 
 - 具体版本号以 `bs9p --version` 为准
-- v2 起密码是任意字符串；v1 用的是 uint32 数字种子，**与 v2 完全不兼容**
-- 密文格式自 v2 起未变：本次改造只把 ChaCha20 从手写实现换成 OpenSSL `EVP_chacha20`，并重写了写盘与校验流程，容器布局、密钥派生、置换表算法均逐字节保持原样，v2 时期生成的密文仍可解密
-- magic 从 `BS91002` 变为 `BS9P103`，因此 magic 仍是旧值的密文会被拒绝（需要重新加密）
+- v2 起密码是任意字符串；v1 用的是 uint32 数字种子，**完全不兼容**
+- 1.0.4 的容器布局、密钥派生、置换表算法沿用改造前的实现，只把 ChaCha20 换成 OpenSSL `EVP_chacha20`（逐字节等价）并把 magic 升到 `BS9P104`
+- magic 自 1.0.4 起为 `BS9P104`；1.0.3 的 `BS9P103` 与更早的 `BS91002` 密文不再支持（这些版本都没对外发布，不做兼容读取）
 
 ## 已知限制
 
-- **不做压缩**：密文 = 明文 + `ext_len` + 82 字节
+- **没有压缩**：密文 = 明文 + `ext_len` + 82 字节
 - **无法区分密码错误与文件损坏**：两者都报 `Wrong password or corrupted file`
-- **没有进度显示**：大文件加密时看不到进度
 - **只处理单个文件**：不支持目录递归或批量
 - **不覆盖已有文件**：报 `File already exists`，需要自己先删
 - **超大文件解密会在验证前写明文**：> 128 MiB 的文件为了只读一遍密文，临时文件在 MAC 验证完成前就包含解密结果（失败会删除）
+- **控制台只做了 Windows 的处理**：Linux / macOS 直接按 UTF-8 字节输出，终端 locale 不是 UTF-8 时可能显示异常（文件名本身不受影响）
 
 ## 许可
 

@@ -4,7 +4,7 @@
 #define _BS9_MAGIC 1
 
 namespace bs9 {
-  inline const char magic_buf[8] = {'B', 'S', '9', 'P', '1', '0', '3', '\0'};
+  inline const char magic_buf[8] = {'B', 'S', '9', 'P', '1', '0', '4', '\0'};
 
   inline uint64_t build_magic(const char* str) {
     uint64_t val = 0;

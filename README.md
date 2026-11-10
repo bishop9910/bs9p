@@ -15,6 +15,14 @@
 - **常量时间比较** —— MAC 用 `CRYPTO_memcmp` 比较，避免计时侧信道
 - **密钥擦除** —— 派生出的密钥、密码缓冲区在用完后用 `OPENSSL_cleanse` 清零
 
+## 文档
+
+- 使用手册：就是本文件（构建、用法、参数）
+- 格式与算法参考：[`docs/`](docs/README.md)
+  - [文件数据结构](docs/file-format.md) —— 密文的二进制布局、字段表、约束与真实示例
+  - [加密流程](docs/encryption.md) —— `encode` 每一步在做什么
+  - [解密流程](docs/decryption.md) —— `decode` 每一步在做什么、错误信息对照
+
 ## 依赖
 
 - **CMake** >= 3.31
@@ -189,6 +197,8 @@ bs9p --help
 
 密文总长度 = `plain_len + ext_len + 82`（固定开销 82 字节 = 50 字节头 + 32 字节 tag）。
 
+每个字段的语义、约束与一份真实 hexdump 示例见 [文件数据结构](docs/file-format.md)；逐字节的计算过程见 [加密流程](docs/encryption.md)。
+
 解密前会做这些一致性检查，任何一项不满足都直接拒绝（不会创建任何输出文件）：
 
 - magic 必须匹配，`iterations` 必须在合法范围内
@@ -232,6 +242,8 @@ dict   = HMAC-SHA256(master, "bs9p/dict")
 
 两条路径都不会覆盖已存在的文件，也都会在失败时清理临时文件。
 
+> 完整的分步说明（每块数据的处理顺序、校验顺序、失败时磁盘上的状态）见 [加密流程](docs/encryption.md) 与 [解密流程](docs/decryption.md)。
+
 ## 项目结构
 
 ```
@@ -243,6 +255,11 @@ bs9p/
 ├── vcpkg-configuration.json
 ├── LICENSE
 ├── README.md
+├── docs/
+│   ├── README.md         # 文档索引与维护约定
+│   ├── file-format.md    # 密文二进制布局
+│   ├── encryption.md     # 加密流程分步说明
+│   └── decryption.md     # 解密流程分步说明
 ├── include/
 │   ├── atomic_file.hpp   # 临时文件 + fsync + 原子改名
 │   ├── chacha20.hpp      # ChaCha20（OpenSSL EVP_chacha20 封装）
